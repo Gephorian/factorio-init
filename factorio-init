@@ -1,0 +1,244 @@
+#!/bin/bash
+# /etc/init.d/factorio
+# version 1.0.0 2015-07-15 (YYYY-MM-DD)
+# Modified by Adam Coleman
+
+### BEGIN INIT INFO
+# Provides:   factorio
+# Required-Start: $local_fs $remote_fs
+# Required-Stop:  $local_fs $remote_fs
+# Should-Start:   $network
+# Should-Stop:    $network
+# Default-Start:  2 3 4 5
+# Default-Stop:   0 1 6
+# Short-Description:    Factorio Server
+# Description:    Starts the factorio server
+### END INIT INFO
+
+#Settings
+SERVICE='factorio'      # MUST BE UNIQUE IF RUNNING MULTIPLE INSTANCES ON THE SERVER
+USERNAME='factorio'             # Username to run service as
+SRVROOT='/home/factorio'
+LOGFILE="$SRVROOT/logs/${SERVICE}.log"
+STOPTIMEOUT=5
+STOPINTERVAL=2
+
+[ -f "$(basename $0).cfg" ] && source $(basename $0).cfg
+FACTORIO=$SRVROOT/factorio/bin/x64/factorio
+DATADIR=$SRVROOT/factorio/data
+SAVEDIR=$SRVROOT/saves/
+
+# Relative to SRVROOT
+#MAP=saves/$(basename $0).zip
+# General options (defaults work too)
+#LATENCY="100"
+#AUTOSAVE=15
+#PORT=34197
+SETTINGS_JSON=$(basename $0).json
+
+
+INVOCATION="$FACTORIO --port ${PORT:-34197}"
+#INVOCATION="$FACTORIO --autosave-interval ${AUTOSAVE:-15} --port ${PORT:-34197}"
+[[ -n "$SETTINGS_JSON" && -e "$SETTINGS_JSON" ]] && INVOCATION="$INVOCATION --server-settings $SETTINGS_JSON"
+[[ -d "$(basename $0)-mods" ]] && INVOCATION="$INVOCATION --mod-directory $(basename $0)-mods"
+INVOCATION="$INVOCATION --start-server $SRVROOT/${MAP:-factorio.zip}"
+
+cd $SRVROOT
+
+# Functions
+
+ME=`whoami`
+as_user() {
+  if [ $ME == $USERNAME ] ; then
+    bash -c "$1"
+  else
+    su - $USERNAME -c "$1"
+  fi
+}
+
+srv_start() {
+  if ! srv_status; then
+    echo "Starting ${SERVICE}..."
+#   as_user "cd $SRVROOT && screen -dmS $SERVICE \"$INVOCATION > ${LOGFILE} 2>${LOGFILE}.err\""
+#   ^^^ If anyone knows why this doesn't work let me know ^^^
+    nohup $INVOCATION >${LOGFILE} 2>${LOGFILE}.err &
+    sleep 1s
+    if srv_status >/dev/null ; then
+      echo "Server started with PID $PID on port ${PORT:-34197}"
+    else
+      echo "Server failed to start."
+    fi
+    return 0
+  else
+    echo "Server already running."
+    return 1
+  fi
+}
+
+srv_stop() {
+  if srv_status; then
+    echo -n "Killing $SERVICE"
+    loop=0
+    while srv_status > /dev/null; do
+      echo -n '.'
+      as_user "kill $PID"
+      sleep ${STOPINTERVAL:-6}
+      if [[ $loop -ge ${STOPTIMEOUT} ]]; then
+        echo "Could not stop $SERVICE!"
+        return 1
+      fi
+    done; echo
+    srv_status > /dev/null || echo "Service $SERVICE stopped"
+  fi
+  return 0
+}
+
+srv_backup() {
+  return 0
+}
+
+srv_status() {
+  export PID=$(ps aux | grep -v grep | grep -v -i SCREEN | grep $SERVICE | grep '\-\-start-server' | grep "$MAP" | awk '{ print $2 }')
+  echo "Config:"
+  echo "  Map: ${MAP:-factorio.zip}"
+  echo "  Port: ${PORT:-34197}"
+  [ -n "$SETTINGS_JSON" ] && echo "  JSON: $SETTINGS_JSON"
+  if [ -n "$PID" ]; then
+    echo "Server running with PID $PID"
+    return 0
+  else
+    echo "Server not running"
+    return 1
+  fi
+}
+
+srv_update() {
+  if [[ -d factorio && ! -s factorio ]]; then
+    echo "Error: 'factorio' is a directory. Aborting update."
+    return 1
+  fi
+  CURRENT=$(readlink factorio)
+  [ -z "$CURRENT" ] && echo "Could not read current version... rollback won't be possible."
+  if [ "$CURRENT" == "factorio-$1" ]; then
+    echo "Current version already ${CURRENT}. You're good to go!"
+    return 0
+  fi
+  echo -n "Beginning update to $1 in 3... "
+  for i in 2 1 0; do echo -n "${i}... "; sleep 1; done; echo
+  if wget -O factorio.tgz https://www.factorio.com/get-download/$1/headless/linux64; then
+
+    srv_stop
+    unlink factorio 2>/dev/null
+    tar -xf factorio.tgz || srv_rollback $CURRENT
+    mv factorio factorio-$1 || srv_rollback $CURRENT
+    ln -s factorio-$1 factorio || srv_rollback $CURRENT
+    srv_start && srv_notify $1 || srv_notify fail $1
+  else
+    echo "Error: Couldn't download release. Aborting."
+    return 1
+  fi
+}
+
+srv_notify(){
+  # Update code here to notify whatever services of updates
+  WEBHOOK="webhook1"
+  case "$1" in
+    fail)
+      DATA="{\"username\":\"FactorioBot\",\"content\":\"Factorio has failed to update to version $2\"}"
+    ;;
+    *)
+      DATA="{\"username\":\"FactorioBot\",\"content\":\"Factorio has been updated to version $1\"}"
+    ;;
+
+  esac
+  # Post to the webhook
+  curl -H "Content-Type: application/json" -X POST -d "${DATA}" ${WEBHOOK}
+}
+srv_rollback() {
+  if [ -z "$1" ]; then
+    echo "Error: Rollback attempted but no current version!"
+  fi
+  echo "Rolling back to $1"
+  unlink factorio
+  ln -s $CURRENT factorio
+  if readlink factorio > /dev/null; then
+    echo "Starting rolled back server..."
+    srv_start
+  fi
+  srv_notify fail $1
+}
+
+srv_create(){
+  if [ -e "${1}.zip" ]; then
+    echo "File exists: ${1}.zip"
+    echo "Refusing to overwrite existing file"
+    return 1
+  fi
+  if [ -e "$(basename $0)-mapgen.json" ]; then
+    MAPGEN="--map-gen-settings $(basename $0)-mapgen.json"
+  fi
+  if [ -n "$2" ]; then
+    if [ -e "$2" ];then
+      MAPGEN="--map-gen-settings $2"
+    else
+      echo "Error: Mapgen settings specified but don't exist."
+      return 1
+    fi
+  fi
+  $FACTORIO --create $1 $MAPGEN
+}
+
+srv_init() {
+  echo "Initializing configs..."
+  set -x
+  [ ! -f "$(basename $0)-mapgen.json" ] && cp $DATADIR/map-gen-settings.example.json $(basename $0)-mapgen.json
+  [ ! -f "$(basename $0).json" ]        && cp $DATADIR/server-settings.example.json  $(basename $0).json
+  [ ! -f "$(basename $0).cfg" ]         && \
+echo "SERVICE=factorio
+[ ! -d "$(basename $0)-mods" ] && mkdir $(basename $0)-mods
+# Relative to SRVROOT
+MAP=${MAP:-saves/$(basename $0).zip}
+# General options (defaults work too)
+LATENCY='100'
+#AUTOSAVE=15
+PORT=xxxx
+">$(basename $0).cfg
+  srv_create ${MAP:-saves/$(basename $0).zip}
+  set +x
+}
+
+# Start-Stop here
+case "$1" in
+  start)
+    srv_start
+    ;;
+  stop)
+    srv_stop
+    ;;
+  restart)
+    srv_stop
+    sleep 5s
+    srv_start
+    ;;
+  backup)
+    ;;
+  status)
+    srv_status
+    ;;
+  create)
+    srv_create ${2:-$MAP} $3
+    ;;
+  update)
+    srv_update $2
+    ;;
+  init)
+    srv_init
+    ;;
+  *)
+  echo -e "\033[33mUsage: /etc/init.d/factorio {start|stop|status|restart|create|init|update <version>\033[0m"
+  exit 1
+  ;;
+esac
+
+exit 0
+
