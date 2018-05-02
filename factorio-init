@@ -196,6 +196,7 @@ srv_init() {
   [ ! -f "$(basename $0).cfg" ]         && \
 echo "SERVICE=factorio
 [ ! -d "$(basename $0)-mods" ] && mkdir $(basename $0)-mods
+[ ! -d "logs" ] && mkdir logs
 # Relative to SRVROOT
 MAP=${MAP:-saves/$(basename $0).zip}
 # General options (defaults work too)
