@@ -141,7 +141,7 @@ srv_update() {
 
 srv_notify(){
   # Update code here to notify whatever services of updates
-  WEBHOOK="webhook1"
+  WEBHOOKS=("webhook1" "webhook2")
   case "$1" in
     fail)
       DATA="{\"username\":\"FactorioBot\",\"content\":\"Factorio has failed to update to version $2\"}"
@@ -152,7 +152,9 @@ srv_notify(){
 
   esac
   # Post to the webhook
-  curl -H "Content-Type: application/json" -X POST -d "${DATA}" ${WEBHOOK}
+  for WEBHOOK in ${WEBHOOKS[*]}; do
+    curl -H "Content-Type: application/json" -X POST -d "${DATA}" ${WEBHOOK}
+  done
 }
 srv_rollback() {
   if [ -z "$1" ]; then
